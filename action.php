@@ -76,4 +76,13 @@ switch ($action) {
         echo json_encode(['success' => false, 'message' => 'Action non reconnue.']);
         break;
 }
+require 'db_config.php';
+
+function majCase($pdo, $joueur, $x, $y, $etat) {
+    $stmt = $pdo->prepare("UPDATE plateaux SET etat = ? WHERE joueur = ? AND x = ? AND y = ?");
+    $stmt->execute([$etat, $joueur, $x, $y]);
+}
+
+
+
 ?>

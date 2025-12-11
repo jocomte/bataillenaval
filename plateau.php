@@ -95,6 +95,21 @@ function dessiner_grille($grille, $mode, $cible) {
     endfor;
     echo '</div>';
 }
+require 'db_config.php';
+
+function getPlateau($pdo, $joueur) {
+    $stmt = $pdo->prepare("SELECT x, y, etat FROM plateaux WHERE joueur = ?");
+    $stmt->execute([$joueur]);
+    $cases = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+    $plateau = array_fill(0, 10, array_fill(0, 10, 'eau'));
+
+    foreach ($cases as $case) {
+        $plateau[$case['x']][$case['y']] = $case['etat'];
+    }
+
+    return $plateau;
+}
 ?>
 
 <!DOCTYPE html>
