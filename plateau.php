@@ -1,24 +1,39 @@
 <?php
-session_start();
 
-// --- Logique de réinitialisation ---
+// Fichier: game.php
+session_start();
+include 'db_config.php'; // Inclure la connexion SQL
+
+// --- Définition de la taille du plateau ---
+$TAILLE_PLATEAU = 10;
+
+// --- Logique de réinitialisation (MISE À JOUR SQL) ---
 if (isset($_GET["reset"])) {
-    // Détruire la session
+    // 1. Détruire la session et les cookies (INCHANGÉ)
     session_destroy();
     setcookie(session_name(), "", time() - 3600);
 
-    // Réinitialiser les joueurs
+    // 2. Réinitialiser les joueurs (JSON INCHANGÉ)
     file_put_contents("etat_joueurs.json", json_encode([
         "j1" => null,
         "j2" => null
     ]));
 
-    // Réinitialiser les plateaux avec des grilles vides 10x10
-    file_put_contents("plateaux.json", json_encode([
-        "j1" => ["grille" => array_fill(0, 10, array_fill(0, 10, 0)), "pret" => false],
-        "j2" => ["grille" => array_fill(0, 10, array_fill(0, 10, 0)), "pret" => false]
-    ]));
-
+    // 3. Réinitialiser les plateaux (SUPPRESSION/MISE À JOUR SQL)
+    try {
+        // Suppression de toutes les données liées aux plateaux, bateaux et coups.
+        // C'est l'approche la plus simple pour une réinitialisation complète.
+        $pdo->exec("DELETE FROM Segments");
+        $pdo->exec("DELETE FROM Coups");
+        $pdo->exec("DELETE FROM Plateaux");
+        
+        // Optionnel : Réinitialiser l'auto-incrément après la suppression
+        $pdo->exec("ALTER TABLE Plateaux AUTO_INCREMENT = 1"); 
+        
+    } catch (\PDOException $e) {
+        // Gérer l'erreur de suppression SQL
+        error_log("Erreur lors de la réinitialisation SQL: " . $e->getMessage());
+    }
 
     // Repartir propre
     header("Location: index.php");
@@ -31,84 +46,146 @@ if (!isset($_SESSION["role"])) {
 }
 
 $role = $_SESSION["role"]; // Ex: joueur1 ou joueur2
-$joueur_id = ($role === "joueur1") ? "j1" : "j2";
-$adversaire_id = ($role === "joueur1") ? "j2" : "j1";
+$joueur_id = ($role === "joueur1") ? "j1" : "j2"; // ID du joueur (j1 ou j2)
+$adversaire_id = ($role === "joueur1") ? "j2" : "j1"; // ID de l'adversaire
 
-// --- Lecture de l'état du jeu ---
-// Initialisation du plateau si le fichier est vide (pour plus de robustesse)
-$plateaux_content = file_get_contents("plateaux.json");
-if (empty($plateaux_content)) {
-    file_put_contents("plateaux.json", json_encode([
-        "j1" => ["grille" => array_fill(0, 10, array_fill(0, 10, 0)), "pret" => false],
-        "j2" => ["grille" => array_fill(0, 10, array_fill(0, 10, 0)), "pret" => false]
-    ]));
-    $plateaux_content = file_get_contents("plateaux.json");
+// --- FONCTIONS SQL POUR LA LECTURE DES DONNÉES ---
+
+// Fonction pour récupérer l'ID du plateau à partir de l'ID du joueur
+function getPlateauId($pdo, $joueur_id) {
+    $stmt = $pdo->prepare("SELECT id_plateau FROM Plateaux WHERE id_joueur = ?");
+    $stmt->execute([$joueur_id]);
+    return $stmt->fetchColumn() ?: null;
 }
 
-$plateaux_data = json_decode($plateaux_content, true);
+// Fonction pour construire la grille du plateau
+function buildGrille($pdo, $plateau_id, $is_my_board) {
+    global $TAILLE_PLATEAU;
+    $grille = array_fill(0, $TAILLE_PLATEAU, array_fill(0, $TAILLE_PLATEAU, 0)); // 0 = Mer
 
-$mon_plateau = $plateaux_data[$joueur_id];
-// Le plateau adversaire est utile pour la logique de tir, mais ici juste pour l'affichage du nom
-$plateau_adversaire = $plateaux_data[$adversaire_id]; 
+    if (!$plateau_id) {
+        return $grille; // Retourne une grille vide si aucun plateau n'existe
+    }
 
-$ma_grille = $mon_plateau["grille"] ?? array_fill(0, 10, array_fill(0, 10, 0));
-$pret = $mon_plateau["pret"] ?? false;
+    // 1. Récupérer les segments de bateaux (utilisé pour mon_plateau)
+    if ($is_my_board) {
+        $stmt_bateaux = $pdo->prepare("SELECT coordonnee_x AS x, coordonnee_y AS y FROM Segments WHERE id_plateau = ?");
+        $stmt_bateaux->execute([$plateau_id]);
+        foreach ($stmt_bateaux->fetchAll() as $segment) {
+            $grille[$segment['y']][$segment['x']] = 1; // 1 = Segment de Bateau
+        }
+    }
 
-// La grille de tir est initialisée vide pour l'instant
-$grille_tir = array_fill(0, 10, array_fill(0, 10, 0)); 
+    // 2. Récupérer les coups enregistrés sur ce plateau
+    // Note: Pour la grille de tir, nous affichons les coups tirés sur l'ADVERSAIRE.
+    // Pour ma grille, nous affichons les coups que j'AI REÇUS.
+    $stmt_coups = $pdo->prepare("SELECT coordonnee_x AS x, coordonnee_y AS y, resultat FROM Coups WHERE id_plateau_cible = ?");
+    $stmt_coups->execute([$plateau_id]);
+    foreach ($stmt_coups->fetchAll() as $coup) {
+        // Codes pour l'affichage: 2 = Manqué (Plouf), 3 = Touché
+        $code = ($coup['resultat'] === 'plouf') ? 2 : 3;
+        $grille[$coup['y']][$coup['x']] = $code;
+    }
+
+    return $grille;
+}
+
+// --- LECTURE DE L'ÉTAT DU JEU (MIXTE SQL/JSON) ---
+
+// Récupération de l'ID de mes plateaux et de ceux de l'adversaire
+$mon_plateau_id = getPlateauId($pdo, $joueur_id);
+$adversaire_plateau_id = getPlateauId($pdo, $adversaire_id);
+
+// Récupération des données de la grille SQL
+// Ma Grille : affiche mes bateaux (1) et les coups reçus (2 ou 3)
+$ma_grille = buildGrille($pdo, $mon_plateau_id, true);
+
+// Grille de Tir : affiche les coups que j'ai tirés sur l'adversaire (2 ou 3)
+// Pour cela, nous lisons les coups enregistrés sur le plateau ADVERSAIRE.
+$grille_tir = buildGrille($pdo, $adversaire_plateau_id, false);
 
 
-// Fonction utilitaire pour dessiner une grille
+// --- LECTURE DE L'ÉTAT 'PRET' (CONSERVÉE EN JSON) ---
+$plateaux_content = file_get_contents("plateaux.json");
+// Rendre le code plus robuste pour éviter les erreurs de lecture JSON
+$plateaux_data = json_decode($plateaux_content, true) ?: [
+    "j1" => ["pret" => false], 
+    "j2" => ["pret" => false]
+];
+
+$pret = $plateaux_data[$joueur_id]["pret"] ?? false;
+$adversaire_pret = $plateaux_data[$adversaire_id]["pret"] ?? false;
+
+
+// --- Le reste de votre logique de dessin et d'interface reste le même ---
+
+// Fonction utilitaire pour dessiner une grille (MISE À JOUR POUR LES NOUVEAUX CODES)
+// TEMPORAIRE : Remplacez VOTRE fonction dessiner_grille
+// Modifiez la déclaration de la fonction pour utiliser les variables déjà calculées
+
+// ... (Toute la logique PHP jusqu'à la ligne 104 reste inchangée) ...
+
+// Fonction utilitaire pour dessiner une grille (CORRIGÉE)
 function dessiner_grille($grille, $mode, $cible) {
-    global $pret, $plateaux_data, $adversaire_id;
+    
+    // VARIABLES GLOBALES NÉCESSAIRES
+    global $pret, $adversaire_pret; 
+    $TAILLE_PLATEAU = 10;
+    
+    // Début du rendu de la grille HTML
     echo '<div class="grid ' . $mode . '">';
-    for ($y = 0; $y < 10; $y++):
-        for ($x = 0; $x < 10; $x++):
-            $contenu_cellule = $grille[$y][$x] ?? 0;
+    
+    for ($y = 0; $y < $TAILLE_PLATEAU; $y++) {
+        for ($x = 0; $x < $TAILLE_PLATEAU; $x++) {
+            
+            $contenu_cellule = $grille[$y][$x] ?? 0; 
             $classes = "cell";
-
             $clic_action = '';
             
-            // 1. Logique de Ma Grille (Placement)
+            // --- Logique du Plateau Actuel (Mes Bateaux / Coups reçus) ---
             if ($mode === 'ma-grille') {
-                if (!$pret) {
-                    // Si pas prêt, la cellule est cliquable pour PLACER
+                
+                // 1. Placement
+                if (!$pret) { 
                     $classes .= " placable";
                     $clic_action = 'onclick="placerSegment(' . $x . ', ' . $y . ')"';
                 }
-                if ($contenu_cellule == 1) { // 1 = Segment de Bateau
+                
+                // 2. Affichage
+                if ($contenu_cellule == 1) {       
                     $classes .= " bateau";
+                } elseif ($contenu_cellule == 2) { 
+                    $classes .= " plouf-recu";
+                } elseif ($contenu_cellule == 3) { 
+                    $classes .= " touche-recu";
                 }
             } 
-            // 2. Logique de Grille de Tir (Tir)
+            
+            // --- Logique du Plateau de Tir (Coups envoyés) ---
             elseif ($mode === 'grille-tir') {
-                // Le tir n'est permis que si les deux joueurs sont prêts
-                $adversaire_pret = $plateaux_data[$adversaire_id]["pret"] ?? false;
-                if ($pret && $adversaire_pret) { 
+                
+                // CORRECTION CRITIQUE : Ajout des accolades {}
+                if ($pret && $adversaire_pret) {
                     $clic_action = 'onclick="tirer(' . $x . ', ' . $y . ')"';
+                } // La boucle continue ici
+                
+                // Affichage des résultats de mes tirs sur l'adversaire
+                if ($contenu_cellule == 2) {       
+                    $classes .= " plouf-tire";
+                } elseif ($contenu_cellule == 3) { 
+                    $classes .= " touche-tire";
                 }
             }
 
+            // Génération de la cellule
             echo '<div class="' . $classes . '" data-x="' . $x . '" data-y="' . $y . '" id="' . $cible . '-' . $x . '-' . $y . '" ' . $clic_action . '>';
             echo '</div>';
-        endfor;
-    endfor;
+            
+        } // Fin de la boucle X
+    } // Fin de la boucle Y
+    
+    // Fermeture de la grille
     echo '</div>';
-}
-require 'db_config.php';
-
-function getPlateau($pdo, $joueur) {
-    $stmt = $pdo->prepare("SELECT x, y, etat FROM plateaux WHERE joueur = ?");
-    $stmt->execute([$joueur]);
-    $cases = $stmt->fetchAll(PDO::FETCH_ASSOC);
-
-    $plateau = array_fill(0, 10, array_fill(0, 10, 'eau'));
-
-    foreach ($cases as $case) {
-        $plateau[$case['x']][$case['y']] = $case['etat'];
-    }
-
-    return $plateau;
 }
 ?>
 
@@ -117,6 +194,7 @@ function getPlateau($pdo, $joueur) {
 <head>
     <meta charset="UTF-8">
     <title>Plateau de jeu</title>
+    
     <style>
         body {
             font-family: Arial, sans-serif;
@@ -162,6 +240,18 @@ function getPlateau($pdo, $joueur) {
         .ma-grille .cell.bateau {
             background-color: #3f51b5 !important;
             color: white;
+        }
+
+        /* Nouveaux styles pour les codes SQL (2=Plouf, 3=Touché) */
+        .ma-grille .cell.plouf-recu, 
+        .grille-tir .cell.plouf-tire {
+            background-color: #4dd0e1 !important; /* Bleu clair */
+            /* content: '💧'; <-- Non valide dans CSS, à afficher en JS/PHP */
+        }
+        .ma-grille .cell.touche-recu, 
+        .grille-tir .cell.touche-tire {
+            background-color: #ef5350 !important; /* Rouge clair */
+            /* content: '🔥'; <-- Non valide dans CSS, à afficher en JS/PHP */
         }
 
         .actions {
@@ -232,7 +322,6 @@ function getPlateau($pdo, $joueur) {
     const joueurId = '<?= $joueur_id ?>';
     let estPret = <?= $pret ? 'true' : 'false' ?>;
 
-
     // --- Logique de Placement ---
     function placerSegment(x, y) {
         if (estPret) {
@@ -274,8 +363,8 @@ function getPlateau($pdo, $joueur) {
 
     // --- Logique "Prêt" ---
     function setPret(pretState) {
-         estPret = (pretState === 'true' || pretState === true);
-         
+          estPret = (pretState === 'true' || pretState === true);
+          
         // Envoi de la requête AJAX pour changer l'état de 'pret'
         fetch('action.php', {
             method: 'POST',
@@ -291,24 +380,8 @@ function getPlateau($pdo, $joueur) {
         .then(response => response.json())
         .then(data => {
             if (data.success) {
-                // Mise à jour de l'interface utilisateur après succès
-                const button = document.getElementById('bouton-pret');
-                const status = document.getElementById('statut-placement');
-
-                if (estPret) {
-                    button.textContent = 'Prêt ! (Attente)';
-                    button.disabled = true;
-                    button.classList.remove('non-pret');
-                    button.classList.add('est-pret');
-                    status.innerHTML = '🟢 Placement Terminé. En attente de l\'adversaire...';
-                    
-                } else {
-                    button.textContent = 'J\'ai Placé mes Bateaux';
-                    button.disabled = false;
-                    button.classList.remove('est-pret');
-                    button.classList.add('non-pret');
-                    status.innerHTML = '🔴 Phase de Placement. Cliquez sur votre grille pour placer des segments de bateau.';
-                }
+                // Rechargement pour mettre à jour l'affichage de l'adversaire
+                window.location.reload(); 
             } else {
                 alert("Erreur lors de la mise à jour de l'état 'Prêt': " + data.message);
                 estPret = !estPret; // Rétablit l'état en cas d'erreur
@@ -339,7 +412,7 @@ function getPlateau($pdo, $joueur) {
     border-radius:5px;
     ">
     🔄 Réinitialiser la partie
-    </a>
+</a>
 
 </body>
 </html>
