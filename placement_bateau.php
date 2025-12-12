@@ -1,40 +1,54 @@
 <?php
 // placement_bateau.php
 
+// DOIT ÊTRE LA PREMIÈRE INSTRUCTION EXÉCUTABLE
+session_start();
+
 // 1. Connexion et Utilitaires
-require_once 'db_config.php'; // Doit fournir la variable $pdo (PDO instance)
+require_once 'db_config.php';
 require_once 'fonctions_bataille.php';
+
+// --- CONFIGURATION / IDENTIFICATION DU JOUEUR ---
+$PARTIE_ID = 1; 
+$role = $_SESSION["role"] ?? 'joueur1'; 
+$JOUEUR_ID_BDD = ($role === "joueur1") ? 1 : 2;
+$ERREUR = null;
 
 // Définit les bateaux standards (Pour la validation)
 $bateaux_definitions = [
     'Porte-avions' => 5,
     'Cuirassé' => 4,
-    'Croiseur' => 3, // On pourrait en avoir plusieurs de taille 3
+    'Croiseur' => 3, 
     'Torpilleur' => 2
 ];
+$NOMBRE_MAX_BATEAUX = count($bateaux_definitions);
 
-// Simule l'ID de partie et de joueur (A adapter pour une vraie gestion de session)
-$PARTIE_ID = 1; 
-$JOUEUR_ID = 1; 
-$ERREUR = null;
-
+// --- 0. VÉRIFICATION DE LA MÉTHODE ET REDIRECTION ---
 if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
     header('Location: index.php');
     exit;
 }
 
-// 2. Récupération des données du formulaire
-$nom_bateau = $_POST['nom_bateau'] ?? ''; // Ex: 'Porte-avions'
-$case_depart = strtoupper(trim($_POST['coordonnee_depart'] ?? '')); // Ex: 'B3'
-$orientation = strtoupper(trim($_POST['orientation'] ?? '')); // Ex: 'H'
+// 2. Récupération des données du formulaire (VALIDE UNIQUEMENT DANS CE BLOC POST)
+$nom_bateau = $_POST['nom_bateau'] ?? '';
+$case_depart = strtoupper(trim($_POST['coordonnee_depart'] ?? ''));
+$orientation = strtoupper(trim($_POST['orientation'] ?? ''));
 
-// Validation initiale des données
-if (!isset($bateaux_definitions[$nom_bateau]) || empty($case_depart) || !in_array($orientation, ['H', 'V'])) {
-    $ERREUR = "Données du formulaire invalides.";
+// --- Détermination de la Taille ---
+$taille = 0;
+foreach ($bateaux_definitions as $name => $size) {
+    if (strpos($nom_bateau, $name) !== false) {
+        $taille = $size;
+        break;
+    }
+}
+
+// Validation initiale des données (Formulaire)
+if ($taille === 0 || empty($case_depart) || !in_array($orientation, ['H', 'V'])) {
+    $ERREUR = "Données du formulaire invalides (taille/coordonnée manquante).";
 }
 
 if (!$ERREUR) {
-    $taille = $bateaux_definitions[$nom_bateau];
     $depart_indices = coord_to_indices($case_depart);
 
     if (is_null($depart_indices)) {
@@ -42,7 +56,7 @@ if (!$ERREUR) {
     }
 }
 
-// 3. Logique de Placement et de Validation
+// 3. Logique de Placement et de Validation (PHP)
 if (!$ERREUR) {
     // Calcul des cases que le NOUVEAU bateau occuperait
     $cases_a_occuper = calculer_cases_bateau($depart_indices, $taille, $orientation);
@@ -52,32 +66,51 @@ if (!$ERREUR) {
     }
 }
 
+// --- 4. LOGIQUE DE TRANSACTION BDD (SQL) ---
 if (!$ERREUR) {
     try {
-        $pdo->beginTransaction();
-
-        // A. Vérifier si ce type de bateau n'est pas déjà placé (pour les bateaux uniques)
-        $stmt_check = $pdo->prepare("SELECT COUNT(*) FROM bateaux WHERE partie_id = ? AND joueur_id = ? AND nom_bateau = ?");
-        $stmt_check->execute([$PARTIE_ID, $JOUEUR_ID, $nom_bateau]);
-        if ($stmt_check->fetchColumn() > 0) {
-            $ERREUR = "Le bateau '{$nom_bateau}' est déjà placé.";
+        // Lancer la transaction UNIQUEMENT si aucune n'est active
+        if (!$pdo->inTransaction()) {
+            $pdo->beginTransaction();
         }
         
-        // B. Récupérer les bateaux déjà placés pour vérifier les chevauchements
+        // 4.1. VÉRIFICATION DE LA LIMITE MAXIMALE DE BATEAUX
+        $stmt_total = $pdo->prepare("SELECT COUNT(*) FROM bateaux WHERE partie_id = ? AND joueur_id = ?");
+        $stmt_total->execute([$PARTIE_ID, $JOUEUR_ID_BDD]);
+        $bateaux_deja_places = $stmt_total->fetchColumn();
+        
+        if ($bateaux_deja_places >= $NOMBRE_MAX_BATEAUX) {
+            // Vérifier si le bateau soumis est déjà dans la BDD (si oui, on le laisse passer pour le test d'unicité)
+            $stmt_check_unicite = $pdo->prepare("SELECT COUNT(*) FROM bateaux WHERE partie_id = ? AND joueur_id = ? AND nom_bateau = ?");
+            $stmt_check_unicite->execute([$PARTIE_ID, $JOUEUR_ID_BDD, $nom_bateau]);
+            
+            if ($stmt_check_unicite->fetchColumn() === 0) {
+                 $ERREUR = "Limite atteinte : Vous avez déjà placé le nombre maximum de bateaux ({$NOMBRE_MAX_BATEAUX}).";
+            }
+        }
+        
+        // 4.2. VÉRIFICATION D'UNICITÉ (pour les types de bateaux)
+        if (!$ERREUR) {
+            $stmt_check = $pdo->prepare("SELECT COUNT(*) FROM bateaux WHERE partie_id = ? AND joueur_id = ? AND nom_bateau = ?");
+            $stmt_check->execute([$PARTIE_ID, $JOUEUR_ID_BDD, $nom_bateau]);
+            if ($stmt_check->fetchColumn() > 0) {
+                $ERREUR = "Le bateau '{$nom_bateau}' est déjà placé.";
+            }
+        }
+
+        // 4.3. VÉRIFICATION DU CHEVAUCHEMENT
         if (!$ERREUR) {
             $stmt_existants = $pdo->prepare("SELECT case_depart, taille, orientation FROM bateaux WHERE partie_id = ? AND joueur_id = ?");
-            $stmt_existants->execute([$PARTIE_ID, $JOUEUR_ID]);
+            $stmt_existants->execute([$PARTIE_ID, $JOUEUR_ID_BDD]);
             $bateaux_existants = $stmt_existants->fetchAll(PDO::FETCH_ASSOC);
 
             foreach ($bateaux_existants as $bateau) {
-                // Calculer les cases occupées par le bateau existant
                 $cases_existantes = calculer_cases_bateau(
                     coord_to_indices($bateau['case_depart']), 
                     $bateau['taille'], 
                     $bateau['orientation']
                 );
                 
-                // Vérifier le chevauchement
                 if (check_overlap($cases_a_occuper, $cases_existantes)) {
                     $ERREUR = "Le placement chevauche un bateau existant.";
                     break;
@@ -85,39 +118,34 @@ if (!$ERREUR) {
             }
         }
 
-        // 4. Insertion du nouveau bateau dans la BDD (Si la validation passe)
+        // 4.4. INSERTION (Si tout est OK)
         if (!$ERREUR) {
             $sql = "INSERT INTO bateaux (partie_id, joueur_id, nom_bateau, taille, case_depart, orientation) 
                     VALUES (?, ?, ?, ?, ?, ?)";
             $stmt = $pdo->prepare($sql);
-            $stmt->execute([
-                $PARTIE_ID, 
-                $JOUEUR_ID, 
-                $nom_bateau, 
-                $taille, 
-                $case_depart, 
-                $orientation
-            ]);
+            $stmt->execute([$PARTIE_ID, $JOUEUR_ID_BDD, $nom_bateau, $taille, $case_depart, $orientation]);
 
             $pdo->commit();
             header('Location: index.php?message=Bateau+placé+avec+succès');
             exit;
 
         } else {
-             // Si erreur pendant la transaction (chevauchement, déjà placé, etc.)
+             // Erreur détectée dans la transaction
             $pdo->rollBack();
             header('Location: index.php?erreur=' . urlencode($ERREUR));
             exit;
         }
 
     } catch (PDOException $e) {
-        // Erreur SQL grave (connexion, syntaxe, etc.)
-        $pdo->rollBack();
+        // Erreur SQL
+        if ($pdo->inTransaction()) { 
+            $pdo->rollBack();
+        }
         header('Location: index.php?erreur=' . urlencode("Erreur SQL: " . $e->getMessage()));
         exit;
     }
 } else {
-    // Erreur de validation initiale (formulaire)
+    // Erreur de validation initiale (Formulaire/PHP)
     header('Location: index.php?erreur=' . urlencode($ERREUR));
     exit;
 }

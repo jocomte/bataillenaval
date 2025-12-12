@@ -1,33 +1,36 @@
 <?php
-// Fichier: game.php (Votre fichier fusionné)
+// Fichier: game.php (Corrigé et consolidé)
 session_start();
-include 'db_config.php'; // Inclure la connexion SQL
-require_once 'fonctions_bataille.php'; // Utilitaires de coordonnées
+include 'db_config.php'; 
+require_once 'fonctions_bataille.php';
 
 // --- Définition de la taille du plateau ---
-$TAILLE_GRILLE = 10; // Renommée pour l'uniformité.
+$TAILLE_GRILLE = 10; 
 
-// --- Logique de réinitialisation (MISE À JOUR SQL) ---
+// --- IDENTIFICATION DU JOUEUR & PARTIE ---
+if (!isset($_SESSION["role"])) {
+    header("Location: index.php"); // Rediriger si le rôle n'est pas défini (sécurité)
+    exit;
+}
+$role = $_SESSION["role"]; // Ex: joueur1 ou joueur2
+$joueur_id_json = ($role === "joueur1") ? "j1" : "j2";
+$adversaire_id_json = ($role === "joueur1") ? "j2" : "j1";
+
+$PARTIE_ID = 1; 
+$JOUEUR_ID_BDD = ($role === "joueur1") ? 1 : 2; // L'ID numérique pour la table 'bateaux'
+
+// --- Logique de réinitialisation ---
 if (isset($_GET["reset"])) {
-    // 1. Détruire la session et les cookies (INCHANGÉ)
     session_destroy();
     setcookie(session_name(), "", time() - 3600);
+    
+    file_put_contents("etat_joueurs.json", json_encode(["j1" => null, "j2" => null]));
 
-    // 2. Réinitialiser les joueurs (JSON INCHANGÉ)
-    file_put_contents("etat_joueurs.json", json_encode([
-        "j1" => null,
-        "j2" => null
-    ]));
-
-    // 3. Réinitialiser les plateaux (SUPPRESSION/MISE À JOUR SQL)
     try {
-        // Supprimer toutes les données liées aux BATEAUX (Nouvelle logique)
-        $pdo->exec("DELETE FROM bateaux"); 
-        
-        // Supprimer les données liées aux anciens systèmes (si vous les gardez)
+        // Supprimer toutes les données de la partie pour assurer un reset propre
+        $pdo->exec("DELETE FROM bateaux WHERE partie_id = " . $PARTIE_ID);
         $pdo->exec("DELETE FROM Segments");
         $pdo->exec("DELETE FROM Coups");
-        // $pdo->exec("DELETE FROM Plateaux"); // Si vous gardez la table Plateaux
 
     } catch (\PDOException $e) {
         error_log("Erreur lors de la réinitialisation SQL: " . $e->getMessage());
@@ -37,81 +40,51 @@ if (isset($_GET["reset"])) {
     exit;
 }
 
-if (!isset($_SESSION["role"])) {
-    header("Location: index.php");
-    exit;
-}
-
-// ... (Début du fichier)
-$role = $_SESSION["role"]; // Ex: joueur1 ou joueur2
-$joueur_id_json = ($role === "joueur1") ? "j1" : "j2"; // ID du joueur (j1 ou j2)
-$adversaire_id_json = ($role === "joueur1") ? "j2" : "j1"; // ID de l'adversaire
-
-// CORRECTION CLÉ: Utiliser un identifiant BDD basé sur le rôle ou l'ID de partie/joueur.
-// Pour la table 'bateaux', utilisons 1 pour j1 et 2 pour j2.
-$PARTIE_ID = 1; // ID de la partie, toujours 1 pour l'instant
-$JOUEUR_ID_BDD = ($role === "joueur1") ? 1 : 2; // Utiliser 1 ou 2 pour différencier dans la table 'bateaux'
-// REMPLACER toutes les instances de $JOUEUR_ID (qui valait 1) par $JOUEUR_ID_BDD.
-
-// ... Dans la récupération des bateaux (lignes 86-93 du code précédent) :
-$stmt_form = $pdo->prepare("SELECT nom_bateau FROM bateaux WHERE partie_id = ? AND joueur_id = ?");
-$stmt_form->execute([$PARTIE_ID, $JOUEUR_ID_BDD]); // <--- Utilisation de JOUEUR_ID_BDD
-// ...
-// Idem pour la récupération des bateaux à afficher (lignes 97-99) :
-$stmt_display = $pdo->prepare("SELECT case_depart, taille, orientation FROM bateaux WHERE partie_id = ? AND joueur_id = ?");
-$stmt_display->execute([$PARTIE_ID, $JOUEUR_ID_BDD]); // <--- Utilisation de JOUEUR_ID_BDD
-
 // Définition de TOUS les bateaux
-// NOTE: Pensez à rendre les noms uniques (ex: 'Croiseur 1', 'Croiseur 2') dans le formulaire.
 $bateaux_a_placer = [
     'Porte-avions' => 5,
     'Cuirassé' => 4,
-    'Croiseur' => 3, 
+    'Croiseur' => 3, // Pensez à renommer en 'Croiseur 1' si vous en voulez un deuxième
     'Torpilleur' => 2
 ];
 
 // --- 1. Préparation du Tableau d'Affichage ($plateau_affichage) ---
-$plateau_affichage = array_fill(0, $TAILLE_GRILLE, array_fill(0, $TAILLE_GRILLE, 0)); // 0 = Eau (Code compatible avec l'ancienne grille)
+$plateau_affichage = array_fill(0, $TAILLE_GRILLE, array_fill(0, $TAILLE_GRILLE, 0)); // 0 = Eau
+$error_db = null;
 
 try {
-    // Récupérer les bateaux DÉJÀ placés par le joueur (pour le formulaire)
+    // 1.1 Récupérer les bateaux DÉJÀ placés par le joueur (pour le formulaire)
     $stmt_form = $pdo->prepare("SELECT nom_bateau FROM bateaux WHERE partie_id = ? AND joueur_id = ?");
-    $stmt_form->execute([$PARTIE_ID, $JOUEUR_ID]);
+    $stmt_form->execute([$PARTIE_ID, $JOUEUR_ID_BDD]); // CLÉ : Utiliser l'ID BDD correct
     $noms_bateaux_places = $stmt_form->fetchAll(PDO::FETCH_COLUMN);
 
     // Filtrer la liste à afficher dans le formulaire
     $bateaux_restants = array_diff_key($bateaux_a_placer, array_flip($noms_bateaux_places));
 
-    // 2. Lire les bateaux placés depuis la BDD (pour l'affichage)
+    // 1.2 Lire les bateaux placés depuis la BDD (pour l'affichage)
     $stmt_display = $pdo->prepare("SELECT case_depart, taille, orientation FROM bateaux WHERE partie_id = ? AND joueur_id = ?");
-    $stmt_display->execute([$PARTIE_ID, $JOUEUR_ID]);
+    $stmt_display->execute([$PARTIE_ID, $JOUEUR_ID_BDD]); // CLÉ : Utiliser l'ID BDD correct
     $bateaux_places = $stmt_display->fetchAll(PDO::FETCH_ASSOC);
 
-    // 3. Marquer les cases occupées dans $plateau_affichage
+    // 1.3 Marquer les cases occupées dans $plateau_affichage (1 = Bateau)
     foreach ($bateaux_places as $bateau) {
         $depart_indices = coord_to_indices($bateau['case_depart']);
         
         if ($depart_indices) {
-            $cases_occupees = calculer_cases_bateau(
-                $depart_indices, 
-                (int)$bateau['taille'], 
-                $bateau['orientation']
-            );
+            $cases_occupees = calculer_cases_bateau($depart_indices, (int)$bateau['taille'], $bateau['orientation']);
 
             foreach ($cases_occupees as $indices) {
                 list($l, $c) = $indices;
                 if ($l >= 0 && $l < $TAILLE_GRILLE && $c >= 0 && $c < $TAILLE_GRILLE) {
-                    // 1 = Bateau (Compatible avec l'ancienne fonction dessiner_grille)
-                    $plateau_affichage[$l][$c] = 1; 
+                    $plateau_affichage[$l][$c] = 1;
                 }
             }
         }
     }
 
-    // MARQUAGE DES COUPS REÇUS (Si vous les gardez)
-    // Ici, vous ajouteriez la logique pour récupérer les coups REÇUS (2=Plouf, 3=Touché) 
-    // et les marquer dans $plateau_affichage, écrasant le '1' si le bateau est touché.
-
+    // [FUTURE LOGIQUE : COUPS REÇUS]
+    // Ici, vous récupéreriez les coups où id_plateau_cible = JOUEUR_ID_BDD pour marquer 2 ou 3
+    
 } catch (PDOException $e) {
     $error_db = "Erreur de chargement BDD : " . $e->getMessage();
     $bateaux_restants = $bateaux_a_placer;
@@ -123,19 +96,18 @@ $ma_grille = $plateau_affichage;
 // --- LECTURE DE L'ÉTAT 'PRET' (CONSERVÉE EN JSON) ---
 $plateaux_content = file_get_contents("plateaux.json");
 $plateaux_data = json_decode($plateaux_content, true) ?: [
-    "j1" => ["pret" => false], 
-    "j2" => ["pret" => false]
+    "j1" => ["pret" => false], "j2" => ["pret" => false]
 ];
 
 $pret = $plateaux_data[$joueur_id_json]["pret"] ?? false;
 $adversaire_pret = $plateaux_data[$adversaire_id_json]["pret"] ?? false;
 
-// --- Fonction utilitaire pour dessiner une grille  ---
+
+// --- Fonction utilitaire pour dessiner une grille (avec entêtes) ---
 function dessiner_grille($grille, $mode, $cible) {
     global $pret, $adversaire_pret, $TAILLE_GRILLE;
     
-    // Début du rendu de la grille HTML
-    // Utilisez 'grid-entetes' comme nouvelle classe pour le style spécifique aux entêtes
+    // Début du rendu de la grille HTML (Utilise la classe 11x11)
     echo '<div class="grid ' . $mode . ' grid-entetes">';
     
     // 1. CELLULE VIDE (Coin supérieur gauche)
@@ -152,25 +124,28 @@ function dessiner_grille($grille, $mode, $cible) {
         // EN-TÊTE DE LIGNE (1, 2, 3...)
         echo '<div class="cell entete">' . ($y + 1) . '</div>'; 
         
-        // AFFICHAGE DES CELLULES DE JEU (comme avant)
+        // AFFICHAGE DES CELLULES DE JEU 
         for ($x = 0; $x < $TAILLE_GRILLE; $x++) {
-            // ... (Logique de contenu et de classe des cellules reste ici) ...
             
             $contenu_cellule = $grille[$y][$x] ?? 0; 
             $classes = "cell";
             $clic_action = '';
             
-            // Logique de classe CSS (bateau, plouf, touche)
+            // Logique de classe CSS
             if ($mode === 'ma-grille') {
                 if ($contenu_cellule == 1) { 
-                    $classes .= " bateau";
+                    $classes .= " bateau"; // Votre bateau placé
                 } elseif ($contenu_cellule == 2) { 
                     $classes .= " plouf-recu";
                 } elseif ($contenu_cellule == 3) { 
                     $classes .= " touche-recu";
                 }
             } elseif ($mode === 'grille-tir') {
-                // Logique des tirs
+                 // Future logique de clic ici pour tirer si c'est le tour
+                 if ($pret && $adversaire_pret) {
+                    $clic_action = 'onclick="tirer(' . $x . ', ' . $y . ')"';
+                 }
+                // Logique d'affichage des résultats de tirs (2, 3)
             }
 
             // Génération de la cellule
@@ -179,7 +154,6 @@ function dessiner_grille($grille, $mode, $cible) {
         }
     }
     
-    // Fermeture de la grille
     echo '</div>';
 }
 ?>
@@ -191,77 +165,84 @@ function dessiner_grille($grille, $mode, $cible) {
     <title>Plateau de jeu</title>
     
     <style>
-        /* Conserver vos styles CSS */
-        /* ... */
-        .plateaux-container {
+        /* CONSOLIDATION ET CORRECTION CSS */
+        body { font-family: Arial, sans-serif; display: flex; flex-direction: column; align-items: center; }
+        .plateaux-container { display: flex; gap: 50px; margin-top: 20px; }
+        
+        /* Définition de la grille 10x10 standard (ancienne référence, peut être ignorée) */
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(10, 40px);
+            grid-template-rows: repeat(10, 40px);
+            gap: 0;
+            border: 2px solid #333;
+        }
+        
+        /* Définition de la grille 11x11 avec entêtes */
+        .grid.grid-entetes {
+            grid-template-columns: repeat(11, 40px); 
+            grid-template-rows: repeat(11, 40px);
+            gap: 0;
+            border: 2px solid #333;
+        }
+
+        .cell {
+            width: 40px;
+            height: 40px;
+            background-color: #a8dadc; /* Couleur de l'eau par défaut */
+            border: 1px solid #000; /* BORDURE NOIRE CLAIRE */
             display: flex;
-            gap: 50px;
-            margin-top: 20px;
-        }
-        .grid {
-        display: grid;
-        grid-template-columns: repeat(10, 40px);
-        grid-template-rows: repeat(10, 40px);
-        gap: 0; /* Si 'gap' ne marche pas, nous comptons sur la bordure */
-        border: 2px solid #333; /* Bordure extérieure du plateau */
+            justify-content: center;
+            align-items: center;
+            user-select: none;
+            font-size: 0.8em;
+            cursor: default; 
+            line-height: 40px; /* Ajouté pour centrage vertical si contenu */
         }
         
-
-        .grid {
-    display: grid;
-    grid-template-columns: repeat(10, 40px);
-    grid-template-rows: repeat(10, 40px);
-    gap: 0; /* Si 'gap' ne marche pas, nous comptons sur la bordure */
-    border: 2px solid #333; /* Bordure extérieure du plateau */
-    }
-    .grid.grid-entetes {
-    /* 11 colonnes : 1 pour les numéros de ligne + 10 pour les colonnes de jeu */
-    grid-template-columns: repeat(11, 40px); 
-    /* 11 lignes : 1 pour les lettres de colonne + 10 pour les lignes de jeu */
-    grid-template-rows: repeat(11, 40px);
-    gap: 0;
-    border: 2px solid #333;
-    }
-
-    .cell.entete {
-    background-color: #ddd;
-    font-weight: bold;
-    border: 1px solid #777; /* Bordure des entêtes */
-    }
-    .cell {
-    width: 40px;
-    height: 40px;
-    /* Couleur de fond par défaut (eau/non touché) */
-    background-color: #a8dadc; 
-    /* BORDURE ESSENTIELLE pour voir la grille */
-    border: 1px solid #000; 
-    display: flex;
-    justify-content: center;
-    align-items: center;
-    user-select: none;
-    font-size: 0.8em;
-    cursor: default; /* Non cliquable */
-    }
-
-    /* Styles spécifiques au jeu */
-    /* ... */
-
-    .ma-grille .cell.bateau {
-        /* Utilisation de !important si nécessaire pour écraser le background par défaut */
-        background-color: #3f51b5 !important; 
-        color: white;
-    }
-        
-        /* SUPPRIMER les styles qui concernent votre plateau en double */
-        .grille { /* ANCIENNE GRILLE EN DOUBLE */
-            display: none !important; /* Cacher la grille en double pour le moment */
+        /* Style des entêtes */
+        .cell.entete {
+            background-color: #ddd;
+            font-weight: bold;
+            border: 1px solid #777; 
         }
+
+        /* Style Bateau (Assure la visibilité) */
+        .ma-grille .cell.bateau {
+            background-color: #3f51b5 !important; /* Couleur forte */
+            color: white;
+            /* La bordure est déjà gérée par .cell */
+        }
+        
+        /* Styles pour les coups reçus/tirés */
+        .ma-grille .cell.plouf-recu, 
+        .grille-tir .cell.plouf-tire { background-color: #4dd0e1 !important; }
+        .ma-grille .cell.touche-recu, 
+        .grille-tir .cell.touche-tire { background-color: #ef5350 !important; }
+
+        /* Masquer la grille en double */
+        .grille#plateau-joueur-propre { display: none !important; } 
     </style>
 </head>
 <body>
 
 <h1>Plateau de bataille navale</h1>
 <h2>Vous êtes : <?= $role ?></h2>
+
+<div class="plateaux-container">
+    <div class="votre-plateau">
+        <h3>🛥️ Ma Grille (Mes Bateaux)</h3>
+        <?php dessiner_grille($ma_grille, 'ma-grille', $joueur_id_json); ?>
+    </div>
+    
+    <div class="plateau-adversaire">
+        <h3>💥 Grille de Tir (Adversaire : <?= $adversaire_id_json ?>)</h3>
+        <?php 
+        $grille_tir_vide = array_fill(0, $TAILLE_GRILLE, array_fill(0, $TAILLE_GRILLE, 0));
+        dessiner_grille($grille_tir_vide, 'grille-tir', $adversaire_id_json); 
+        ?>
+    </div>
+</div>
 
 <div id="zone-placement">
     <h2>Bateaux à placer :</h2>
@@ -306,45 +287,70 @@ function dessiner_grille($grille, $mode, $cible) {
     <?php endif; ?>
 </div>
 
-<div class="plateaux-container">
-    <div class="votre-plateau">
-        <h3>🛥️ Ma Grille (Mes Bateaux)</h3>
-        <?php dessiner_grille($ma_grille, 'ma-grille', $joueur_id_json); ?>
-    </div>
-    
-    <div class="plateau-adversaire">
-        <h3>💥 Grille de Tir (Adversaire : <?= $adversaire_id_json ?>)</h3>
-        <?php 
-        // TEMPORAIRE: Créer une grille vide pour éviter une erreur si buildGrille n'est pas définie
-        $grille_tir_vide = array_fill(0, $TAILLE_GRILLE, array_fill(0, $TAILLE_GRILLE, 0));
-        dessiner_grille($grille_tir_vide, 'grille-tir', $adversaire_id_json); 
-        ?>
-    </div>
-</div>
+<a href="?reset=1" style="
+    display:inline-block;
+    margin-top:20px;
+    padding:8px 15px;
+    background:#c00;
+    color:white;
+    text-decoration:none;
+    border-radius:5px;
+    ">
+    🔄 Réinitialiser la partie
+</a>
 
-<div class="grille" id="plateau-joueur-propre">
-    </div>
+<script>
+    function tirer(x, y) {
+    // Vérification de base (tour de jeu, etc.) à ajouter ici
+    if (!estPret || !adversaireEstPret) { 
+        alert("La phase de placement n'est pas terminée.");
+        return;
+    }
+    
+    // 1. Création dynamique du formulaire de tir
+    const form = document.createElement('form');
+    form.method = 'POST';
+    form.action = 'action.php';
+
+    // 2. Champs requis pour l'action.php
+    
+    // Champ 1: Action (indique au serveur de tirer)
+    const actionInput = document.createElement('input');
+    actionInput.type = 'hidden';
+    actionInput.name = 'action';
+    actionInput.value = 'tirer'; // <--- NOUVEAU
+
+    // Champ 2: ID du joueur tireur
+    const joueurInput = document.createElement('input');
+    joueurInput.type = 'hidden';
+    joueurInput.name = 'joueur_tireur_id';
+    joueurInput.value = joueurBddId; // <--- NOUVEAU
+
+    // Champ 3: Coordonnée X
+    const xInput = document.createElement('input');
+    xInput.type = 'hidden';
+    xInput.name = 'x';
+    xInput.value = x;
+
+    // Champ 4: Coordonnée Y
+    const yInput = document.createElement('input');
+    yInput.type = 'hidden';
+    yInput.name = 'y';
+    yInput.value = y;
+    
+    // 3. Ajout des champs au formulaire
+    form.appendChild(actionInput);
+    form.appendChild(joueurInput);
+    form.appendChild(xInput);
+    form.appendChild(yInput);
+    
+    // 4. Soumission
+    document.body.appendChild(form);
+    form.submit(); 
+    
+    // Après submit(), la page se recharge avec les messages de action.php
+    }
+</script>
 
 </body>
-<a href="?reset=1" style="
-
-    display:inline-block;
-
-    margin-top:20px;
-
-    padding:8px 15px;
-
-    background:#c00;
-
-    color:white;
-
-    text-decoration:none;
-
-    border-radius:5px;
-
-    ">
-
-    🔄 Réinitialiser la partie
-
-</a>
 </html>
