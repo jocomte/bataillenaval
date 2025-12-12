@@ -24,13 +24,14 @@ if (isset($_GET["reset"])) {
     session_destroy();
     setcookie(session_name(), "", time() - 3600);
     
-    file_put_contents("etat_joueurs.json", json_encode(["j1" => null, "j2" => null]));
+    file_put_contents("etat_joueurs.json", json_encode(["j1" => ["pret" => false], "j2" => ["pret" => false]]));
+    file_put_contents("joueurs.json", json_encode(["j1" => null, "j2" => null]));
 
     try {
         // Supprimer toutes les données de la partie pour assurer un reset propre
-        $pdo->exec("DELETE FROM bateaux WHERE partie_id = " . $PARTIE_ID);
-        $pdo->exec("DELETE FROM Segments");
-        $pdo->exec("DELETE FROM Coups");
+        $pdo->exec("DELETE FROM bateaux WHERE joueur_id = " . $JOUEUR_ID_BDD);
+        $pdo->exec("DELETE FROM segments");
+        $pdo->exec("DELETE FROM coups");
 
     } catch (\PDOException $e) {
         error_log("Erreur lors de la réinitialisation SQL: " . $e->getMessage());
@@ -44,7 +45,8 @@ if (isset($_GET["reset"])) {
 $bateaux_a_placer = [
     'Porte-avions' => 5,
     'Cuirassé' => 4,
-    'Croiseur' => 3, // Pensez à renommer en 'Croiseur 1' si vous en voulez un deuxième
+    'Croiseur (1)' => 3,
+    'Croiseur (2)' => 3,
     'Torpilleur' => 2
 ];
 
@@ -93,15 +95,27 @@ try {
 // L'affichage de mon plateau est maintenant $plateau_affichage
 $ma_grille = $plateau_affichage; 
 
-// --- LECTURE DE L'ÉTAT 'PRET' (CONSERVÉE EN JSON) ---
-$plateaux_content = file_get_contents("plateaux.json");
-$plateaux_data = json_decode($plateaux_content, true) ?: [
-    "j1" => ["pret" => false], "j2" => ["pret" => false]
-];
+// DANS game.php (Début du fichier, après la lecture de session)
+$plateaux_content = file_get_contents("etat_joueurs.json");
+$plateaux_data = json_decode($plateaux_content, true) ?: [ /* ... */ ];
 
 $pret = $plateaux_data[$joueur_id_json]["pret"] ?? false;
 $adversaire_pret = $plateaux_data[$adversaire_id_json]["pret"] ?? false;
 
+// Charger les coups pour afficher sur la grille de tir
+$cible_id = ($role === "joueur1") ? 2 : 1;
+try {
+    $stmt_coups = $pdo->prepare("SELECT coordonnee_x, coordonnee_y, resultat FROM coups WHERE id_plateau_cible = ?");
+    $stmt_coups->execute([$cible_id]);
+    $coups = $stmt_coups->fetchAll(PDO::FETCH_ASSOC);
+} catch (PDOException $e) {
+    $coups = [];
+}
+
+// Afficher les messages
+$message = $_SESSION['message'] ?? null;
+$error = $_SESSION['error'] ?? null;
+unset($_SESSION['message'], $_SESSION['error']);
 
 // --- Fonction utilitaire pour dessiner une grille (avec entêtes) ---
 function dessiner_grille($grille, $mode, $cible) {
@@ -146,10 +160,20 @@ function dessiner_grille($grille, $mode, $cible) {
                     $clic_action = 'onclick="tirer(' . $x . ', ' . $y . ')"';
                  }
                 // Logique d'affichage des résultats de tirs (2, 3)
+                if ($contenu_cellule == 2) {
+                    $classes .= " miss";
+                } elseif ($contenu_cellule == 3) {
+                    $classes .= " hit";
+                }
             }
 
             // Génération de la cellule
             echo '<div class="' . $classes . '" data-x="' . $x . '" data-y="' . $y . '" id="' . $cible . '-' . $x . '-' . $y . '" ' . $clic_action . '>';
+            if ($mode === 'grille-tir' && $contenu_cellule == 2) {
+                echo 'O';
+            } elseif ($mode === 'grille-tir' && $contenu_cellule == 3) {
+                echo 'X';
+            }
             echo '</div>';
         }
     }
@@ -221,7 +245,10 @@ function dessiner_grille($grille, $mode, $cible) {
         .grille-tir .cell.touche-tire { background-color: #ef5350 !important; }
 
         /* Masquer la grille en double */
-        .grille#plateau-joueur-propre { display: none !important; } 
+        .grille#plateau-joueur-propre { display: none !important; }
+        .actions { margin-top: 20px; padding: 15px; border: 1px solid #ccc; border-radius: 8px; text-align: center; }
+        .pret-button { padding: 10px 20px; font-size: 1.1em; cursor: pointer; border: none; border-radius: 5px; color: white; background-color: #4CAF50; }
+        .pret-button:disabled { background-color: #aaa; cursor: not-allowed; } 
     </style>
 </head>
 <body>
@@ -238,11 +265,53 @@ function dessiner_grille($grille, $mode, $cible) {
     <div class="plateau-adversaire">
         <h3>💥 Grille de Tir (Adversaire : <?= $adversaire_id_json ?>)</h3>
         <?php 
-        $grille_tir_vide = array_fill(0, $TAILLE_GRILLE, array_fill(0, $TAILLE_GRILLE, 0));
-        dessiner_grille($grille_tir_vide, 'grille-tir', $adversaire_id_json); 
+        $grille_tir = array_fill(0, $TAILLE_GRILLE, array_fill(0, $TAILLE_GRILLE, 0));
+        foreach ($coups as $coup) {
+            $x = $coup['x'];
+            $y = $coup['y'];
+            if ($coup['resultat'] == 'plouf') {
+                $grille_tir[$y][$x] = 2; // miss
+            } else {
+                $grille_tir[$y][$x] = 3; // hit
+            }
+        }
+        dessiner_grille($grille_tir, 'grille-tir', $adversaire_id_json); 
         ?>
     </div>
 </div>
+<div class="actions">
+    <div id="statut-placement" class="status-message">
+        <?php if ($pret && $adversaire_pret): ?>
+            🟢 Partie en cours. C'est le tour du joueur **<?= $tour_actuel ?>**!
+        <?php elseif ($pret): ?>
+            🟢 Placement Terminé. En attente de l'adversaire...
+        <?php else: ?>
+            🔴 Phase de Placement.
+        <?php endif; ?>
+    </div>
+
+    <?php if (empty($bateaux_restants)): ?>
+        <button id="bouton-pret" class="pret-button"
+                onclick="setPret(<?= $pret ? 'false' : 'true' ?>)"
+                <?= $partie_demarree = ($pret && $adversaire_pret); ?>> <?php if ($partie_demarree): ?>
+                ⚔️ En jeu ! (Placement Verrouillé)
+            <?php elseif ($pret): ?>
+                Prêt ! (En attente de l'adversaire)
+            <?php else: ?>
+                J'ai Placé mes Bateaux
+            <?php endif; ?>
+        </button>
+    <?php else: ?>
+        <p style="color: orange; font-weight: bold;">Placer **<?= count($bateaux_restants) ?>** bateau(x) restant(s).</p>
+    <?php endif; ?>
+</div>
+
+<?php if ($message): ?>
+    <p style="color: green; font-weight: bold;"><?= htmlspecialchars($message) ?></p>
+<?php endif; ?>
+<?php if ($error): ?>
+    <p style="color: red; font-weight: bold;"><?= htmlspecialchars($error) ?></p>
+<?php endif; ?>
 
 <div id="zone-placement">
     <h2>Bateaux à placer :</h2>
@@ -300,11 +369,41 @@ function dessiner_grille($grille, $mode, $cible) {
 </a>
 
 <script>
+    var estPret = <?= $pret ? 'true' : 'false' ?>;
+    var adversaireEstPret = <?= $adversaire_pret ? 'true' : 'false' ?>;
+    var tourActuel = <?= $tour_actuel ?: 'null' ?>;
+    var joueurBddId = <?= $JOUEUR_ID_BDD ?>;
+
+    function setPret(pretState) {
+        const form = document.createElement('form');
+        form.method = 'POST';
+        form.action = 'action.php';
+
+        const actionInput = document.createElement('input');
+        actionInput.type = 'hidden';
+        actionInput.name = 'action';
+        actionInput.value = 'set_pret';
+
+        const pretInput = document.createElement('input');
+        pretInput.type = 'hidden';
+        pretInput.name = 'pret';
+        pretInput.value = pretState;
+
+        form.appendChild(actionInput);
+        form.appendChild(pretInput);
+        document.body.appendChild(form);
+        form.submit();
+    }
+
     function tirer(x, y) {
     // Vérification de base (tour de jeu, etc.) à ajouter ici
     if (!estPret || !adversaireEstPret) { 
         alert("La phase de placement n'est pas terminée.");
         return;
+    }
+    if (tourActuel !== joueurBddId) {
+        // alert("Ce n'est pas votre tour.");
+        // return;
     }
     
     // 1. Création dynamique du formulaire de tir

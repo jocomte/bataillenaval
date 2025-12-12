@@ -10,7 +10,7 @@ if (isset($_GET["reset"])) {
     setcookie(session_name(), "", time() - 3600);
 
     // Réinitialiser les joueurs
-    file_put_contents("etat_joueurs.json", json_encode([
+    file_put_contents("joueurs.json", json_encode([
         "j1" => null,
         "j2" => null
     ]));
@@ -29,7 +29,7 @@ if (isset($_POST["joueur1"])) {
   if ($etat["j1"] === null) {
     $etat["j1"] = session_id();
     $_SESSION["role"] = "joueur1";
-    save_state("etat_joueurs.json", $etat);
+    save_state("joueurs.json", $etat);
   }
 }
 
@@ -37,7 +37,7 @@ if (isset($_POST["joueur2"])) {
   if ($etat["j2"] === null) {
     $etat["j2"] = session_id();
     $_SESSION["role"] = "joueur2";
-    save_state("etat_joueurs.json", $etat);
+    save_state("joueurs.json", $etat);
   }
 }
 

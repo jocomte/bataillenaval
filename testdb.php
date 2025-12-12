@@ -7,7 +7,13 @@ $pass = '3003';
 
 try {
   $pdo = new PDO("mysql:host=$host;dbname=$dbname;charset=utf8", $user, $pass);
-  echo "connexion ok";
+  echo "connexion ok<br>";
+  
+  $result = $pdo->query("DESCRIBE Coups");
+  while ($row = $result->fetch(PDO::FETCH_ASSOC)) {
+      echo $row['Field'] . " - " . $row['Type'] . "<br>";
+  }
+  
 } catch (Exception $e) {
   die('Erreur : ' . $e->getMessage());
 }

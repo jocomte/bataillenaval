@@ -18,7 +18,8 @@ $ERREUR = null;
 $bateaux_definitions = [
     'Porte-avions' => 5,
     'Cuirassé' => 4,
-    'Croiseur' => 3, 
+    'Croiseur (1)' => 3,
+    'Croiseur (2)' => 3,
     'Torpilleur' => 2
 ];
 $NOMBRE_MAX_BATEAUX = count($bateaux_definitions);
@@ -37,7 +38,7 @@ $orientation = strtoupper(trim($_POST['orientation'] ?? ''));
 // --- Détermination de la Taille ---
 $taille = 0;
 foreach ($bateaux_definitions as $name => $size) {
-    if (strpos($nom_bateau, $name) !== false) {
+    if ($nom_bateau === $name) {
         $taille = $size;
         break;
     }
